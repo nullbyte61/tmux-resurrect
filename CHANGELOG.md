@@ -5,6 +5,10 @@
 - Restore floating panes (tmux 3.6+). Windows containing floating panes were
   restored with every pane stacked vertically, because `select-layout` rejects
   the layout tmux reports for them. Works with existing save files.
+- Guard `pane_title` with a `:` prefix so empty titles no longer shift the
+  fields of the saved pane line (tmux-plugins/tmux-resurrect#583). Titles in
+  save files written before this change lose their first character when
+  restored, once; the next save uses the new format.
 
 ### v4.0.0, 2022-04-10
 - Proper handling of `automatic-rename` window option.

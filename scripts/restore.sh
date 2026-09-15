@@ -243,7 +243,7 @@ restore_floating_panes() {
 			IFS=$d read pane_title dir < <(awk -v s="$session_name" -v w="$window_number" -v p="$pane_index" 'BEGIN { FS="\t"; OFS="\t" } /^pane/ && $2 == s && $3 == w && $6 == p { print $7, $8 }' $(last_resurrect_file))
 			dir="$(remove_first_char "$dir")"
 			new_floating_pane "$session_name" "$window_number" "$dir" "$pane_index" "$cell"
-			tmux select-pane -t "${session_name}:${window_number}.${pane_index}" -T "$pane_title"
+			tmux select-pane -t "${session_name}:${window_number}.${pane_index}" -T "$(remove_first_char "$pane_title")"
 		fi
 		pane_index=$((pane_index + 1))
 	done < <(layout_floating_cells "$window_layout")
