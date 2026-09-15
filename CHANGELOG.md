@@ -2,6 +2,9 @@
 
 ### master
 - Remove deprecated "restoring shell history" feature.
+- Restore floating panes (tmux 3.6+). Windows containing floating panes were
+  restored with every pane stacked vertically, because `select-layout` rejects
+  the layout tmux reports for them. Works with existing save files.
 
 ### v4.0.0, 2022-04-10
 - Proper handling of `automatic-rename` window option.

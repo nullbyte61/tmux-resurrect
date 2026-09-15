@@ -6,6 +6,7 @@ source "$CURRENT_DIR/variables.sh"
 source "$CURRENT_DIR/helpers.sh"
 source "$CURRENT_DIR/process_restore_helpers.sh"
 source "$CURRENT_DIR/spinner_helpers.sh"
+source "$CURRENT_DIR/floating_panes_helpers.sh"
 
 # delimiter
 d=$'\t'
@@ -15,6 +16,11 @@ d=$'\t'
 # saved in the array in this variable. Later, process running in existing pane
 # is also not restored. That makes the restoration process more idempotent.
 EXISTING_PANES_VAR=""
+
+# Global variable.
+# Floating panes are not created with the other panes, see
+# floating_panes_helpers.sh.
+FLOATING_PANES_VAR=""
 
 RESTORING_FROM_SCRATCH="false"
 
@@ -58,6 +64,34 @@ is_pane_registered_as_existing() {
 	local pane_index="$3"
 	local pane_custom_id="${session_name}:${window_number}:${pane_index}"
 	[[ "$EXISTING_PANES_VAR" =~ "$pane_custom_id" ]]
+}
+
+saved_window_pane_count() {
+	local session_name="$1"
+	local window_number="$2"
+	awk -v s="$session_name" -v w="$window_number" 'BEGIN { FS="\t" } /^pane/ && $2 == s && $3 == w { n++ } END { print n+0 }' $(last_resurrect_file)
+}
+
+register_floating_panes() {
+	local line_type session_name window_number window_name window_active window_flags window_layout automatic_rename
+	local floating_count pane_count pane_index
+	while IFS=$d read line_type session_name window_number window_name window_active window_flags window_layout automatic_rename; do
+		floating_count="$(layout_floating_count "$window_layout")"
+		if [ "$floating_count" -eq 0 ]; then
+			continue
+		fi
+		pane_count="$(saved_window_pane_count "$session_name" "$window_number")"
+		for ((pane_index = pane_count - floating_count; pane_index < pane_count; pane_index++)); do
+			FLOATING_PANES_VAR="${FLOATING_PANES_VAR}${d}${session_name}:${window_number}:${pane_index}${d}"
+		done
+	done < <(\grep '^window' $(last_resurrect_file))
+}
+
+is_floating_pane() {
+	local session_name="$1"
+	local window_number="$2"
+	local pane_index="$3"
+	[[ "$FLOATING_PANES_VAR" == *"${d}${session_name}:${window_number}:${pane_index}${d}"* ]]
 }
 
 restore_from_scratch_true() {
@@ -173,6 +207,48 @@ new_pane() {
 	tmux resize-pane -t "${session_name}:${window_number}" -U "999"
 }
 
+new_floating_pane() {
+	local session_name="$1"
+	local window_number="$2"
+	local dir="$3"
+	local pane_index="$4"
+	local cell="$5"
+	local pane_id="${session_name}:${window_number}.${pane_index}"
+	local width height x y
+	IFS=',x' read width height x y _ <<< "$cell"
+	dir="${dir/#\~/$HOME}"
+	if is_restoring_pane_contents && pane_contents_file_exists "$pane_id"; then
+		local pane_creation_command="$(pane_creation_command "$session_name" "$window_number" "$pane_index")"
+		tmux new-pane -d -t "${session_name}:${window_number}" -x "$width" -y "$height" -X "$x" -Y "$y" -c "$dir" "$pane_creation_command"
+	else
+		tmux new-pane -d -t "${session_name}:${window_number}" -x "$width" -y "$height" -X "$x" -Y "$y" -c "$dir"
+	fi
+}
+
+# Recreates the floating panes of a window. Must run after the layout without
+# floating panes is applied.
+restore_floating_panes() {
+	local session_name="$1"
+	local window_number="$2"
+	local window_layout="$3"
+	local floating_count="$(layout_floating_count "$window_layout")"
+	if [ "$floating_count" -eq 0 ]; then
+		return
+	fi
+	local pane_count="$(saved_window_pane_count "$session_name" "$window_number")"
+	local pane_index=$((pane_count - floating_count))
+	local cell pane_title dir
+	while read cell; do
+		if ! pane_exists "$session_name" "$window_number" "$pane_index"; then
+			IFS=$d read pane_title dir < <(awk -v s="$session_name" -v w="$window_number" -v p="$pane_index" 'BEGIN { FS="\t"; OFS="\t" } /^pane/ && $2 == s && $3 == w && $6 == p { print $7, $8 }' $(last_resurrect_file))
+			dir="$(remove_first_char "$dir")"
+			new_floating_pane "$session_name" "$window_number" "$dir" "$pane_index" "$cell"
+			tmux select-pane -t "${session_name}:${window_number}.${pane_index}" -T "$pane_title"
+		fi
+		pane_index=$((pane_index + 1))
+	done < <(layout_floating_cells "$window_layout")
+}
+
 restore_pane() {
 	local pane="$1"
 	while IFS=$d read line_type session_name window_number window_active window_flags pane_index pane_title dir pane_active pane_command pane_full_command; do
@@ -180,6 +256,10 @@ restore_pane() {
 		pane_full_command="$(remove_first_char "$pane_full_command")"
 		if [ "$session_name" == "0" ]; then
 			restored_session_0_true
+		fi
+		if is_floating_pane "$session_name" "$window_number" "$pane_index"; then
+			# created by restore_floating_panes, once the layout is applied
+			continue
 		fi
 		if pane_exists "$session_name" "$window_number" "$pane_index"; then
 			if is_restoring_from_scratch; then
@@ -267,6 +347,7 @@ restore_all_panes() {
 	if is_restoring_pane_contents; then
 		pane_content_files_restore_from_archive
 	fi
+	register_floating_panes
 	while read line; do
 		if is_line_type "pane" "$line"; then
 			restore_pane "$line"
@@ -288,7 +369,8 @@ restore_window_properties() {
 	local window_name
 	\grep '^window' $(last_resurrect_file) |
 		while IFS=$d read line_type session_name window_number window_name window_active window_flags window_layout automatic_rename; do
-			tmux select-layout -t "${session_name}:${window_number}" "$window_layout"
+			tmux select-layout -t "${session_name}:${window_number}" "$(layout_without_floating_panes "$window_layout")"
+			restore_floating_panes "$session_name" "$window_number" "$window_layout"
 
 			# Below steps are properly handling window names and automatic-rename
 			# option. `rename-window` is an extra command in some scenarios, but we
